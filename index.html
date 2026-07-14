@@ -117,6 +117,18 @@
           <input name="preference" placeholder="例如：周末轻一点，每天最多三件事，要有复习日" />
         </label>
 
+        <details class="ai-config">
+          <summary>AI 设置</summary>
+          <label class="field">
+            <span>OpenAI API Key</span>
+            <input name="apiKey" type="password" autocomplete="off" placeholder="sk-..." />
+          </label>
+          <label class="field">
+            <span>模型</span>
+            <input name="model" value="gpt-4.1-mini" />
+          </label>
+        </details>
+
         <button class="primary-button" type="submit">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 3 14.4 8.6 20 11l-5.6 2.4L12 19l-2.4-5.6L4 11l5.6-2.4Z" />

@@ -238,6 +238,11 @@ button {
   overflow-wrap: anywhere;
 }
 
+button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
 .secondary-button {
   padding: 0 16px;
   background: var(--surface-strong);
@@ -519,6 +524,41 @@ button {
   background: var(--accent-soft);
   border-color: rgba(23, 107, 91, 0.36);
   color: var(--accent-strong);
+}
+
+.plan-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.plan-actions > * {
+  min-height: 38px;
+  padding: 0 8px;
+  font-size: 13px;
+  box-shadow: none;
+}
+
+.plan-actions svg {
+  width: 16px;
+  height: 16px;
+}
+
+.ai-config {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8f4ed;
+}
+
+.ai-config summary {
+  min-height: 32px;
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 900;
 }
 
 .phase-list {

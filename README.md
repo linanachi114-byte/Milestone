@@ -4,6 +4,8 @@ Milestone is a mobile-first long-term goal pomodoro prototype.
 
 It turns a long-term goal into a staged roadmap, expands only the current phase into daily tasks, supports task check-ins, pomodoro focus sessions, plan revision, deadline changes, and history archives.
 
+The prototype can use an OpenAI API key in the browser to generate or revise plans. Without a key, it falls back to a local rule-based planner.
+
 ## Run
 
 Open `index.html` in a browser.

@@ -1,4 +1,5 @@
 const STORAGE_KEY = "longterm-pomodoro-state-v1";
+const AI_CONFIG_KEY = "longterm-pomodoro-ai-config-v1";
 const PLAN_VERSION = 2;
 
 const els = {
@@ -71,6 +72,21 @@ function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 
+function loadAiConfig() {
+  try {
+    return JSON.parse(localStorage.getItem(AI_CONFIG_KEY)) || { apiKey: "", model: "gpt-4.1-mini" };
+  } catch {
+    return { apiKey: "", model: "gpt-4.1-mini" };
+  }
+}
+
+function saveAiConfig(config) {
+  localStorage.setItem(AI_CONFIG_KEY, JSON.stringify({
+    apiKey: config.apiKey || "",
+    model: config.model || "gpt-4.1-mini",
+  }));
+}
+
 function uid(prefix = "id") {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -112,6 +128,12 @@ function formatDate(value) {
 function formatDateLong(value) {
   const date = toDate(value);
   return `${date.getFullYear()} 年 ${date.getMonth() + 1} 月 ${date.getDate()} 日`;
+}
+
+function formatDateWithWeekday(value) {
+  const date = toDate(value);
+  const weekdays = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+  return `${date.getMonth() + 1} 月 ${date.getDate()} 日 ${weekdays[date.getDay()]}`;
 }
 
 function todayISO() {
@@ -238,6 +260,160 @@ function createGoalPlan(input) {
 
   generateDailyPlansForPhase(goal, phases[0].id, "初始生成");
   return goal;
+}
+
+async function createGoalPlanWithAi(input, aiConfig) {
+  if (!aiConfig.apiKey) return createGoalPlan(input);
+  const effectiveStart = input.includeStart ? input.startDate : addDays(input.startDate, 1);
+  const payload = await requestAiJson({
+    aiConfig,
+    system: [
+      "你是一个严谨的长期目标执行教练，专长是把长期目标拆成可执行、可检查的移动端每日计划。",
+      "不要写抽象任务。每个任务必须包含具体动作、数量或时长、明确产出物或验收标准。",
+      "只细化第一阶段的每日任务；后续阶段只给主题和验收标准，避免过度预规划。",
+      "每日任务数量必须遵守用户强度和偏好。任务文字要短，适合手机端展示。",
+    ].join("\n"),
+    user: {
+      goal: input.title,
+      startDate: input.startDate,
+      effectiveStart,
+      endDate: input.endDate,
+      includeStart: input.includeStart,
+      minutesPerDay: Number(input.minutes),
+      intensity: input.intensity,
+      preference: input.preference || "",
+      expectedOutput: "返回阶段路线图，以及第一阶段从 startDate 到 endDate 内每一天的具体任务。",
+    },
+    schemaName: "milestone_goal_plan",
+    schema: goalPlanSchema(),
+  });
+  return hydrateAiGoalPlan(input, payload);
+}
+
+function goalPlanSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["phases", "dailyPlans"],
+    properties: {
+      phases: {
+        type: "array",
+        minItems: 2,
+        maxItems: 5,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["title", "startDate", "endDate", "outcome"],
+          properties: {
+            title: { type: "string" },
+            startDate: { type: "string" },
+            endDate: { type: "string" },
+            outcome: { type: "string" },
+          },
+        },
+      },
+      dailyPlans: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["date", "tasks"],
+          properties: {
+            date: { type: "string" },
+            tasks: {
+              type: "array",
+              minItems: 1,
+              maxItems: 5,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["title", "detail", "minutes"],
+                properties: {
+                  title: { type: "string" },
+                  detail: { type: "string" },
+                  minutes: { type: "number" },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+async function requestAiJson({ aiConfig, system, user, schemaName, schema }) {
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${aiConfig.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: aiConfig.model || "gpt-4.1-mini",
+      input: [
+        { role: "system", content: system },
+        { role: "user", content: JSON.stringify(user) },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: schemaName,
+          schema,
+          strict: true,
+        },
+      },
+    }),
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `OpenAI API ${response.status}`);
+  }
+  const data = await response.json();
+  const text = data.output_text || data.output?.flatMap((item) => item.content || []).find((item) => item.type === "output_text")?.text;
+  if (!text) throw new Error("AI 没有返回可解析的计划");
+  return JSON.parse(text);
+}
+
+function hydrateAiGoalPlan(input, aiPlan) {
+  const fallback = createGoalPlan(input);
+  const effectiveStart = input.includeStart ? input.startDate : addDays(input.startDate, 1);
+  const phases = aiPlan.phases
+    .filter((phase) => phase.startDate >= effectiveStart && phase.endDate <= input.endDate && phase.startDate <= phase.endDate)
+    .map((phase, index) => ({
+      id: uid("phase"),
+      title: phase.title.trim(),
+      startDate: phase.startDate,
+      endDate: phase.endDate,
+      outcome: phase.outcome.trim(),
+      expanded: index === 0,
+    }));
+  if (!phases.length) return fallback;
+  const dailyPlans = {};
+  aiPlan.dailyPlans.forEach((day) => {
+    const phase = phases.find((item) => day.date >= item.startDate && day.date <= item.endDate);
+    if (!phase) return;
+    dailyPlans[day.date] = {
+      date: day.date,
+      phaseId: phase.id,
+      note: "AI 生成",
+      tasks: day.tasks.map((task) => ({
+        id: uid("task"),
+        title: task.title.trim(),
+        detail: task.detail.trim(),
+        minutes: Math.max(5, Math.round(Number(task.minutes || input.minutes) / 5) * 5),
+        done: false,
+        completedAt: null,
+      })),
+    };
+  });
+  return {
+    ...fallback,
+    phases,
+    dailyPlans: Object.keys(dailyPlans).length ? dailyPlans : fallback.dailyPlans,
+    aiGenerated: true,
+  };
 }
 
 function buildOutcome(domain, phaseTitle, goalTitle) {
@@ -386,6 +562,75 @@ function reviseFuturePlans(goal, feedback) {
   goal.planVersion = PLAN_VERSION;
 }
 
+async function reviseFuturePlansWithAi(goal, feedback, aiConfig) {
+  if (!aiConfig.apiKey) {
+    reviseFuturePlans(goal, feedback);
+    return false;
+  }
+  const today = todayISO();
+  const futureDates = Object.keys(goal.dailyPlans)
+    .filter((date) => date >= today)
+    .sort();
+  const payload = await requestAiJson({
+    aiConfig,
+    system: [
+      "你是一个长期目标执行教练，正在根据用户反馈重写未发生的每日任务。",
+      "保留已经完成的任务；只重写今天和未来未完成任务。",
+      "任务必须具体，包含动作、数量或时长、产出物或验收标准。",
+    ].join("\n"),
+    user: {
+      goal: goal.title,
+      feedback,
+      minutesPerDay: goal.minutes,
+      intensity: goal.intensity,
+      preference: goal.preference || "",
+      futureDates,
+      phases: goal.phases.map((phase) => ({
+        title: phase.title,
+        startDate: phase.startDate,
+        endDate: phase.endDate,
+        outcome: phase.outcome,
+      })),
+    },
+    schemaName: "milestone_revised_daily_plans",
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["dailyPlans"],
+      properties: {
+        dailyPlans: goalPlanSchema().properties.dailyPlans,
+      },
+    },
+  });
+  payload.dailyPlans.forEach((day) => {
+    if (!goal.dailyPlans[day.date]) return;
+    const phase = findPhaseForDate(goal, day.date);
+    if (!phase) return;
+    const doneTasks = goal.dailyPlans[day.date].tasks.filter((task) => task.done);
+    const aiTasks = day.tasks.map((task) => ({
+      id: uid("task"),
+      title: task.title.trim(),
+      detail: task.detail.trim(),
+      minutes: Math.max(5, Math.round(Number(task.minutes || goal.minutes) / 5) * 5),
+      done: false,
+      completedAt: null,
+    }));
+    goal.dailyPlans[day.date] = {
+      date: day.date,
+      phaseId: phase.id,
+      note: feedback || "AI 重新安排",
+      tasks: [...doneTasks, ...aiTasks],
+    };
+  });
+  goal.revisions.push({
+    id: uid("revision"),
+    at: new Date().toISOString(),
+    feedback: feedback || "AI 重新安排后续计划",
+  });
+  goal.planVersion = PLAN_VERSION;
+  return true;
+}
+
 function extendOrShrinkGoal(goal, newEndDate) {
   if (newEndDate < getEffectiveStart(goal)) {
     toast("结束日期不能早于有效开始日期");
@@ -468,7 +713,7 @@ function render() {
 
 function updateHeader(goal) {
   const titles = {
-    today: "今天",
+    today: formatDateWithWeekday(todayISO()),
     roadmap: "路线",
     focus: "专注",
     history: "历史",
@@ -606,7 +851,7 @@ function renderTodayGoal(goal) {
         </div>
       </div>
       ${dayContent}
-      <div class="inline-actions">
+      <div class="inline-actions plan-actions">
         <button class="secondary-button" data-action="view-roadmap" data-goal-id="${goal.id}">${icon("flag")} 路线</button>
         <button class="secondary-button" data-action="open-revise" data-goal-id="${goal.id}">${icon("arrow")} 调整</button>
         <button class="primary-button" data-action="start-first" data-goal-id="${goal.id}">${icon("timer")} 专注</button>
@@ -927,12 +1172,15 @@ function finishFocus(goal) {
 
 function openGoalDialog() {
   const today = todayISO();
+  const aiConfig = loadAiConfig();
   els.goalForm.reset();
   els.goalForm.elements.startDate.value = today;
   els.goalForm.elements.endDate.value = addDays(today, 29);
   els.goalForm.elements.includeStart.checked = true;
   els.goalForm.elements.minutes.value = "45";
   els.goalForm.elements.intensity.value = "steady";
+  els.goalForm.elements.apiKey.value = aiConfig.apiKey || "";
+  els.goalForm.elements.model.value = aiConfig.model || "gpt-4.1-mini";
   els.goalDialog.showModal();
 }
 
@@ -1081,7 +1329,7 @@ els.backButton.addEventListener("click", () => {
   render();
 });
 
-els.goalForm.addEventListener("submit", (event) => {
+els.goalForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const formData = new FormData(els.goalForm);
   const startDate = formData.get("startDate");
@@ -1094,7 +1342,7 @@ els.goalForm.addEventListener("submit", (event) => {
     return;
   }
 
-  const goal = createGoalPlan({
+  const input = {
     title: formData.get("goal").trim(),
     startDate,
     endDate,
@@ -1102,7 +1350,27 @@ els.goalForm.addEventListener("submit", (event) => {
     minutes: formData.get("minutes"),
     intensity: formData.get("intensity"),
     preference: formData.get("preference").trim(),
-  });
+  };
+  const aiConfig = {
+    apiKey: formData.get("apiKey").trim(),
+    model: formData.get("model").trim() || "gpt-4.1-mini",
+  };
+  saveAiConfig(aiConfig);
+
+  const submitButton = els.goalForm.querySelector('button[type="submit"]');
+  submitButton.disabled = true;
+  submitButton.textContent = aiConfig.apiKey ? "AI 生成中..." : "生成中...";
+  let goal;
+  try {
+    goal = await createGoalPlanWithAi(input, aiConfig);
+  } catch (error) {
+    console.warn(error);
+    goal = createGoalPlan(input);
+    toast("AI 生成失败，已使用本地计划");
+  } finally {
+    submitButton.disabled = false;
+    submitButton.innerHTML = `${icon("spark")} 生成路线图`;
+  }
 
   state.goals.unshift(goal);
   state.activeGoalId = goal.id;
@@ -1111,19 +1379,32 @@ els.goalForm.addEventListener("submit", (event) => {
   saveState();
   els.goalDialog.close();
   render();
-  toast("路线图已生成");
+  toast(goal.aiGenerated ? "AI 路线图已生成" : "本地路线图已生成");
 });
 
-els.reviseForm.addEventListener("submit", (event) => {
+els.reviseForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const goal = getActiveGoal();
   if (!goal) return;
   const feedback = new FormData(els.reviseForm).get("feedback").trim();
-  reviseFuturePlans(goal, feedback);
+  const submitButton = els.reviseForm.querySelector('button[type="submit"]');
+  submitButton.disabled = true;
+  submitButton.textContent = "重排中...";
+  let usedAi = false;
+  try {
+    usedAi = await reviseFuturePlansWithAi(goal, feedback, loadAiConfig());
+  } catch (error) {
+    console.warn(error);
+    reviseFuturePlans(goal, feedback);
+    toast("AI 调整失败，已使用本地重排");
+  } finally {
+    submitButton.disabled = false;
+    submitButton.innerHTML = `${icon("arrow")} 重新安排未完成部分`;
+  }
   saveState();
   els.reviseDialog.close();
   render();
-  toast("后续计划已重排");
+  toast(usedAi ? "AI 已重排后续计划" : "后续计划已重排");
 });
 
 els.dateForm.addEventListener("submit", (event) => {
