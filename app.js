@@ -1,4 +1,5 @@
 const STORAGE_KEY = "longterm-pomodoro-state-v1";
+const PLAN_VERSION = 2;
 
 const els = {
   app: document.querySelector("#app"),
@@ -26,6 +27,7 @@ function createInitialState() {
     view: "today",
     selectedHistoryId: null,
     timer: {
+      goalId: null,
       taskId: null,
       totalSeconds: 25 * 60,
       secondsLeft: 25 * 60,
@@ -38,10 +40,31 @@ function createInitialState() {
 function loadState() {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    return parsed ? { ...createInitialState(), ...parsed } : createInitialState();
+    if (!parsed) return createInitialState();
+    const next = { ...createInitialState(), ...parsed };
+    next.timer = { ...createInitialState().timer, ...(parsed.timer || {}) };
+    migrateState(next);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    return next;
   } catch {
     return createInitialState();
   }
+}
+
+function migrateState(next) {
+  next.goals.forEach((goal) => {
+    if (goal.planVersion === PLAN_VERSION) return;
+    Object.keys(goal.dailyPlans || {}).forEach((date) => {
+      if (date < todayISO()) return;
+      const phase = findPhaseForDate(goal, date);
+      if (!phase) return;
+      const doneTasks = goal.dailyPlans[date].tasks.filter((task) => task.done);
+      const index = dateRange(phase.startDate, phase.endDate).indexOf(date);
+      const freshTasks = tasksForDay(goal, phase, date, Math.max(0, index));
+      goal.dailyPlans[date].tasks = [...doneTasks, ...freshTasks].slice(0, Math.max(doneTasks.length, freshTasks.length));
+    });
+    goal.planVersion = PLAN_VERSION;
+  });
 }
 
 function saveState() {
@@ -97,6 +120,15 @@ function todayISO() {
 
 function getActiveGoal() {
   return state.goals.find((goal) => goal.id === state.activeGoalId) || null;
+}
+
+function getGoalById(goalId) {
+  return state.goals.find((goal) => goal.id === goalId) || null;
+}
+
+function getGoalFromAction(actionTarget) {
+  const goalId = actionTarget.closest("[data-goal-id]")?.dataset.goalId || state.activeGoalId;
+  return getGoalById(goalId);
 }
 
 function getAllGeneratedTasks(goal) {
@@ -198,6 +230,7 @@ function createGoalPlan(input) {
     completedAt: null,
     abandonedAt: null,
     revisions: [],
+    planVersion: PLAN_VERSION,
     phases,
     dailyPlans: {},
     focusSessions: [],
@@ -219,6 +252,27 @@ function buildOutcome(domain, phaseTitle, goalTitle) {
   return `${phaseTitle}：${outcomes[domain]}`;
 }
 
+function goalSubject(goalTitle) {
+  return goalTitle
+    .replace(/^\s*\d+\s*(天|周|个月|年)?\s*(内|之内)?\s*/, "")
+    .replace(/^(完成|学会|掌握|达成|实现|做完|开始|坚持|优化)/, "")
+    .replace(/(第一轮|一轮|基础学习|计划|目标)$/g, "")
+    .replace(/\s+/g, " ")
+    .trim() || goalTitle;
+}
+
+function measurableUnit(domain) {
+  const units = {
+    learning: "3 个关键词、1 条例句、1 个疑问",
+    fitness: "训练项目、组数/时长、体感评分",
+    writing: "150-300 字正文、1 条修改注释",
+    building: "1 个可点击行为、1 条验证记录",
+    exam: "10 道题、错因标签、2 个回忆点",
+    general: "1 个可交付物、3 条验收标准",
+  };
+  return units[domain];
+}
+
 function tasksForDay(goal, phase, date, index) {
   const domain = detectGoalDomain(goal.title);
   const weekday = toDate(date).getDay();
@@ -226,42 +280,45 @@ function tasksForDay(goal, phase, date, index) {
   const baseCount = goal.intensity === "sprint" ? 4 : goal.intensity === "gentle" ? 2 : 3;
   const count = isWeekend && /周末轻|周末少|周末休/.test(goal.preference) ? Math.max(1, baseCount - 1) : baseCount;
   const minutes = Math.max(10, Math.round(goal.minutes / count / 5) * 5);
+  const subject = goalSubject(goal.title);
+  const phaseLabel = phase.title;
+  const unit = measurableUnit(domain);
   const taskSets = {
     learning: [
-      ["输入新内容", "阅读、听课或背诵，并把重点写成自己的话。"],
-      ["主动练习", "做一组小练习，标记不会的地方。"],
-      ["回忆复盘", "合上资料复述今天内容，补齐遗漏。"],
-      ["整理错点", "把卡住的知识点放进明天的回看清单。"],
+      [`学习「${subject}」的一个小节`, `围绕「${phaseLabel}」完成 ${minutes} 分钟输入，留下 ${unit}。`],
+      [`完成「${subject}」专项练习`, "做 10-15 分钟练习，给每个错误标注原因：不熟、没看懂、速度慢。"],
+      [`闭卷回忆「${subject}」`, "不看资料写出今天最重要的 3 点，再回看资料补 1 处遗漏。"],
+      [`整理「${subject}」错点清单`, "把今天卡住的内容写成 3 个明天可复习的问题。"],
     ],
     fitness: [
-      ["完成主训练", "按当前阶段强度完成动作或有氧。"],
-      ["记录身体反馈", "记录体感、心率或重量，不舒服的地方降强度。"],
-      ["恢复拉伸", "做低强度拉伸或灵活性练习。"],
-      ["饮食检查", "记录今天最影响目标的一餐。"],
+      [`完成「${subject}」主训练`, `按「${phaseLabel}」安排完成 ${minutes} 分钟训练，记录 ${unit}。`],
+      [`记录「${subject}」身体反馈`, "写下训练前后体感、疼痛点和明天是否需要降强度。"],
+      [`做「${subject}」恢复拉伸`, "完成 3 个相关部位拉伸，每个动作至少 40 秒。"],
+      [`检查「${subject}」饮食影响`, "记录今天最影响目标的一餐，并写出明天 1 个替代选择。"],
     ],
     writing: [
-      ["推进核心段落", "写出可被修改的内容，不追求一次完美。"],
-      ["整理素材", "补充例子、引用或情节线索。"],
-      ["快速修订", "只改一类问题，例如结构、表达或证据。"],
-      ["留下注释", "写下明天继续时要接住的线头。"],
+      [`写出「${subject}」一段可改内容`, `围绕「${phaseLabel}」产出 ${unit}，不要停在构思。`],
+      [`补齐「${subject}」素材`, "新增 3 条可用素材：例子、论据、场景、引用或人物动作。"],
+      [`修订「${subject}」一个问题`, "只改一类问题：结构、表达、证据或节奏，并记录修改前后差异。"],
+      [`留下「${subject}」续写入口`, "写下明天开头第一句或下一段提纲，避免明天重新热机。"],
     ],
     building: [
-      ["实现一个小功能", "选择能推进目标的最小闭环。"],
-      ["验证当前行为", "手动跑一遍核心路径，记录问题。"],
-      ["改善体验细节", "处理一个会影响使用感的交互或文案。"],
-      ["整理下一步", "把未完成点写成明天可执行的任务。"],
+      [`实现「${subject}」一个可见功能`, `围绕「${phaseLabel}」交付 ${unit}，哪怕版本很小。`],
+      [`验证「${subject}」核心路径`, "从用户入口手动跑 1 遍，记录 1 个通过点和 1 个阻塞点。"],
+      [`修正「${subject}」一个体验问题`, "处理一个会影响使用的按钮、文案、状态或布局问题。"],
+      [`整理「${subject}」下一步`, "把未完成点写成 2 条明天能直接开始的任务。"],
     ],
     exam: [
-      ["推进知识点", "学习一小组考点，并写出关键词。"],
-      ["完成题目训练", "做题后立刻核对原因，不只看答案。"],
-      ["整理错题", "把错因归类到知识、审题或速度。"],
-      ["闭卷回忆", "用 5 分钟复述今天最重要的内容。"],
+      [`学习「${subject}」一组考点`, `围绕「${phaseLabel}」完成 ${unit}，不要只划线。`],
+      [`完成「${subject}」限时题`, "做 10 道题或 15 分钟训练，立刻核对错因。"],
+      [`整理「${subject}」错题`, "把错因归类到知识缺口、审题偏差、速度或记忆不牢。"],
+      [`闭卷回忆「${subject}」`, "用 5 分钟写出今天最重要的 2 个考点和 1 个易错点。"],
     ],
     general: [
-      ["推进一个最小动作", "完成一个今天结束时能看见的成果。"],
-      ["记录关键判断", "写下一个发现、一个问题和一个下一步。"],
-      ["复盘阻力", "确认卡点来自时间、能力、资源还是情绪。"],
-      ["准备明天入口", "留下明天开始时无需思考的第一步。"],
+      [`定义「${subject}」今日交付物`, `围绕「${phaseLabel}」写清 ${unit}，并完成其中最小的一项。`],
+      [`完成「${subject}」一件可检查产出`, "产出一个文件、清单、草稿、记录或截图，结束时能被自己检查。"],
+      [`排除「${subject}」一个阻塞点`, "写出当前最大卡点，选择一个 15 分钟内能验证的解决动作并执行。"],
+      [`准备「${subject}」明天入口`, "留下明天第一步：打开哪个资料、改哪一段、做哪一组或联系谁。"],
     ],
   };
   const set = taskSets[domain];
@@ -326,6 +383,7 @@ function reviseFuturePlans(goal, feedback) {
     at: new Date().toISOString(),
     feedback: feedback || "重新安排后续计划",
   });
+  goal.planVersion = PLAN_VERSION;
 }
 
 function extendOrShrinkGoal(goal, newEndDate) {
@@ -356,6 +414,7 @@ function extendOrShrinkGoal(goal, newEndDate) {
   goal.phases.filter((phase) => phase.expanded || (today >= phase.startDate && today <= phase.endDate)).forEach((phase) => {
     generateDailyPlansForPhase(goal, phase.id, "调整截止日后重排");
   });
+  goal.planVersion = PLAN_VERSION;
   goal.revisions.push({
     id: uid("revision"),
     at: new Date().toISOString(),
@@ -378,6 +437,7 @@ function archiveGoal(goal, status) {
 }
 
 function ensureTodayPlan(goal) {
+  if (!goal) return;
   const today = todayISO();
   if (today < getEffectiveStart(goal) || today > goal.endDate) return;
   if (goal.dailyPlans[today]) return;
@@ -386,17 +446,21 @@ function ensureTodayPlan(goal) {
 }
 
 function render() {
+  if (state.goals.length && !getActiveGoal()) {
+    state.activeGoalId = state.goals[0].id;
+    saveState();
+  }
   const goal = getActiveGoal();
   ensureTimer();
   updateHeader(goal);
   updateTabs();
 
-  if (!goal && state.view !== "history") {
+  if (!state.goals.length && state.view !== "history") {
     renderEmpty();
     return;
   }
 
-  if (state.view === "today") renderToday(goal);
+  if (state.view === "today") renderToday();
   if (state.view === "roadmap") renderRoadmap(goal);
   if (state.view === "focus") renderFocus(goal);
   if (state.view === "history") renderHistory();
@@ -410,7 +474,7 @@ function updateHeader(goal) {
     history: "历史",
   };
   els.headerTitle.textContent = state.selectedHistoryId ? "目标档案" : titles[state.view];
-  els.headerKicker.textContent = goal ? goal.title : "长期主义番茄钟";
+  els.headerKicker.textContent = state.view === "today" && state.goals.length > 1 ? `${state.goals.length} 个进行中计划` : goal ? goal.title : "长期主义番茄钟";
   els.backButton.style.visibility = state.selectedHistoryId ? "visible" : "hidden";
 }
 
@@ -466,76 +530,94 @@ function renderGoalHero(goal) {
   `;
 }
 
-function renderToday(goal) {
-  ensureTodayPlan(goal);
-  const today = todayISO();
-  const plan = goal.dailyPlans[today];
-  const activePhase = currentPhase(goal);
-
-  let dayContent = "";
-  if (today < getEffectiveStart(goal)) {
-    dayContent = `
-      <section class="panel">
-        <p class="eyebrow">还没开始</p>
-        <h2>${formatDateLong(getEffectiveStart(goal))} 开始执行</h2>
-        <p>路线已经准备好，开始当天会展示第一阶段的每日细项。</p>
-      </section>
-    `;
-  } else if (today > goal.endDate) {
-    dayContent = `
-      <section class="panel">
-        <p class="eyebrow">目标周期已结束</p>
-        <h2>可以归档，也可以延长截止日</h2>
-        <div class="inline-actions">
-          <button class="secondary-button" data-action="change-date">改截止日</button>
-          <button class="primary-button" data-action="complete-goal">完成归档</button>
-        </div>
-      </section>
-    `;
-  } else {
-    dayContent = `
-      <section class="panel">
-        <div class="card-topline">
-          <div>
-            <p class="eyebrow">${formatDateLong(today)}</p>
-            <h2>${activePhase.title}</h2>
-          </div>
-          <span class="mini-pill blue">${plan?.tasks.filter((task) => task.done).length || 0}/${plan?.tasks.length || 0}</span>
-        </div>
-        <div class="task-list">
-          ${(plan?.tasks || []).map(renderTask).join("")}
-        </div>
-        <button class="primary-button" data-action="start-first">
-          ${icon("timer")}
-          开始一个番茄
-        </button>
-      </section>
-    `;
-  }
+function renderToday() {
+  state.goals.forEach(ensureTodayPlan);
+  const todayTasks = state.goals.flatMap((goal) => getTodayTasks(goal).map((task) => ({ goal, task })));
+  const doneToday = todayTasks.filter(({ task }) => task.done).length;
 
   els.app.innerHTML = `
     <div class="stack">
-      ${renderGoalHero(goal)}
-      ${dayContent}
-      <section class="panel">
-        <div class="card-topline">
-          <div>
-            <p class="eyebrow">后续可变</p>
-            <h2>只重排还没发生的部分</h2>
-          </div>
+      <section class="goal-hero">
+        <div class="hero-topline">
+          <span class="status-pill">${state.goals.length} 个进行中</span>
+          <span class="mini-pill amber">${doneToday}/${todayTasks.length || 0} 今日细项</span>
         </div>
-        <div class="inline-actions">
-          <button class="secondary-button" data-action="open-revise">${icon("arrow")} 调整计划</button>
-          <button class="secondary-button" data-action="change-date">${icon("calendar")} 改截止日</button>
+        <div>
+          <h2>今天处理所有计划</h2>
+          <p>每个长期目标保留自己的路线、任务和归档；今日页只把它们聚合到一起，方便逐个打卡。</p>
+        </div>
+        <div class="metric-grid">
+          <div class="metric"><b>${state.goals.length}</b><span>计划</span></div>
+          <div class="metric"><b>${todayTasks.length}</b><span>今日任务</span></div>
+          <div class="metric"><b>${doneToday}</b><span>已完成</span></div>
         </div>
       </section>
+      ${state.goals.map(renderTodayGoal).join("")}
     </div>
   `;
 }
 
-function renderTask(task) {
+function renderTodayGoal(goal) {
+  ensureTodayPlan(goal);
+  const today = todayISO();
+  const plan = goal.dailyPlans[today];
+  const activePhase = currentPhase(goal);
+  const progress = getGoalProgress(goal);
+
+  let dayContent = "";
+  if (today < getEffectiveStart(goal)) {
+    dayContent = `
+      <div class="panel-note">
+        <p class="eyebrow">还没开始</p>
+        <h2>${formatDateLong(getEffectiveStart(goal))} 开始执行</h2>
+        <p>路线已经准备好，开始当天会展示第一阶段的每日细项。</p>
+      </div>
+    `;
+  } else if (today > goal.endDate) {
+    dayContent = `
+      <div class="panel-note">
+        <p class="eyebrow">目标周期已结束</p>
+        <h2>可以归档，也可以延长截止日</h2>
+      </div>
+    `;
+  } else {
+    dayContent = `
+      <div class="task-list">
+        ${(plan?.tasks || []).map((task) => renderTask(task, goal)).join("")}
+      </div>
+    `;
+  }
+
   return `
-    <article class="task-card ${task.done ? "completed" : ""}" data-task-id="${task.id}" data-action="toggle-task">
+    <section class="panel today-goal" data-goal-id="${goal.id}">
+      <div class="card-topline">
+        <div>
+          <p class="eyebrow">${formatDateLong(today)}</p>
+          <h2>${escapeHtml(goal.title)}</h2>
+          <p>${today >= getEffectiveStart(goal) && today <= goal.endDate ? activePhase.title : `${formatDate(getEffectiveStart(goal))} - ${formatDate(goal.endDate)}`}</p>
+        </div>
+        <span class="mini-pill blue">${plan?.tasks.filter((task) => task.done).length || 0}/${plan?.tasks.length || 0}</span>
+      </div>
+      <div class="progress-wrap">
+        <div class="progress-track"><div class="progress-bar" style="--progress:${progress.percent}%"></div></div>
+        <div class="progress-meta">
+          <span>${progress.done}/${progress.total || "未细化"} 总细项</span>
+          <span>${progress.percent}%</span>
+        </div>
+      </div>
+      ${dayContent}
+      <div class="inline-actions">
+        <button class="secondary-button" data-action="view-roadmap" data-goal-id="${goal.id}">${icon("flag")} 路线</button>
+        <button class="secondary-button" data-action="open-revise" data-goal-id="${goal.id}">${icon("arrow")} 调整</button>
+        <button class="primary-button" data-action="start-first" data-goal-id="${goal.id}">${icon("timer")} 专注</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderTask(task, goal) {
+  return `
+    <article class="task-card ${task.done ? "completed" : ""}" data-goal-id="${goal.id}" data-task-id="${task.id}" data-action="toggle-task">
       <div class="task-row">
         <div class="task-main">
           <h3>${escapeHtml(task.title)}</h3>
@@ -544,16 +626,37 @@ function renderTask(task) {
         <div class="checkbox" aria-hidden="true">${icon("check")}</div>
       </div>
       <div class="inline-actions">
-        <button class="small-action" data-action="focus-task" data-task-id="${task.id}">${icon("timer")} 专注</button>
-        <button class="small-action" data-action="open-revise">${icon("arrow")} 调整</button>
+        <button class="small-action" data-action="focus-task" data-goal-id="${goal.id}" data-task-id="${task.id}">${icon("timer")} 专注</button>
+        <button class="small-action" data-action="open-revise" data-goal-id="${goal.id}">${icon("arrow")} 调整</button>
       </div>
     </article>
   `;
 }
 
+function renderGoalSwitcher() {
+  if (state.goals.length <= 1) return "";
+  return `
+    <section class="panel">
+      <p class="eyebrow">当前计划</p>
+      <div class="goal-switcher">
+        ${state.goals.map((goal) => `
+          <button class="goal-chip ${goal.id === state.activeGoalId ? "active" : ""}" data-action="select-goal" data-goal-id="${goal.id}">
+            ${escapeHtml(goal.title)}
+          </button>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderRoadmap(goal) {
+  if (!goal) {
+    renderEmpty();
+    return;
+  }
   els.app.innerHTML = `
     <div class="stack">
+      ${renderGoalSwitcher()}
       ${renderGoalHero(goal)}
       <section class="panel">
         <div class="card-topline">
@@ -607,12 +710,18 @@ function renderPhase(goal, phase) {
 }
 
 function renderFocus(goal) {
+  goal = getTimerGoal() || goal;
+  if (!goal) {
+    renderEmpty();
+    return;
+  }
   const task = findTaskById(goal, state.timer.taskId) || findFirstOpenTask(goal);
-  if (task && !state.timer.taskId) setTimerTask(task, false);
+  if (task && (task.id !== state.timer.taskId || state.timer.goalId !== goal.id)) setTimerTask(task, goal, false);
   const seconds = state.timer.secondsLeft;
   const progress = state.timer.totalSeconds ? 360 - Math.round((seconds / state.timer.totalSeconds) * 360) : 0;
   els.app.innerHTML = `
     <div class="stack">
+      ${renderGoalSwitcher()}
       <section class="panel timer-panel">
         <div>
           <p class="eyebrow">当前专注</p>
@@ -638,7 +747,7 @@ function renderFocus(goal) {
       <section class="panel">
         <p class="eyebrow">可选任务</p>
         <div class="task-list">
-          ${getTodayTasks(goal).map(renderTask).join("")}
+          ${getTodayTasks(goal).map((task) => renderTask(task, goal)).join("")}
         </div>
       </section>
     </div>
@@ -726,7 +835,13 @@ function renderHistoryDetail(goal) {
   `;
 }
 
-function setTimerTask(task, shouldRender = true) {
+function getTimerGoal() {
+  return getGoalById(state.timer.goalId) || null;
+}
+
+function setTimerTask(task, goal, shouldRender = true) {
+  state.activeGoalId = goal.id;
+  state.timer.goalId = goal.id;
   state.timer.taskId = task.id;
   state.timer.taskTitle = task.title;
   state.timer.totalSeconds = Math.max(10, task.minutes) * 60;
@@ -756,7 +871,7 @@ function startTimerLoop() {
       toast("本轮番茄完成，可以打卡了");
     }
     saveState();
-    if (state.view === "focus") renderFocus(getActiveGoal());
+    if (state.view === "focus") renderFocus(getTimerGoal() || getActiveGoal());
   }, 1000);
 }
 
@@ -791,7 +906,10 @@ function toggleTask(goal, taskId, forceDone = null) {
 
 function finishFocus(goal) {
   const task = findTaskById(goal, state.timer.taskId);
-  if (task) toggleTask(goal, task.id, true);
+  if (task) {
+    task.done = true;
+    task.completedAt = new Date().toISOString();
+  }
   goal.focusSessions.push({
     id: uid("focus"),
     taskId: task?.id || null,
@@ -803,6 +921,7 @@ function finishFocus(goal) {
   state.timer.secondsLeft = state.timer.totalSeconds;
   stopTimerLoop();
   saveState();
+  render();
   toast("已记录本轮专注");
 }
 
@@ -827,6 +946,7 @@ function icon(name) {
     play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7Z"/></svg>',
     pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>',
     rotate: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v6h6"/></svg>',
+    flag: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 20V4M6 5h10l-1.5 3L16 11H6"/></svg>',
   };
   return icons[name] || "";
 }
@@ -864,27 +984,44 @@ function toast(message) {
 
 document.addEventListener("click", (event) => {
   const actionTarget = event.target.closest("[data-action]");
-  const goal = getActiveGoal();
   if (!actionTarget) return;
   const action = actionTarget.dataset.action;
+  const goal = getGoalFromAction(actionTarget) || getActiveGoal();
 
   if (action === "open-goal") openGoalDialog();
   if (action === "toggle-task" && goal) toggleTask(goal, actionTarget.dataset.taskId);
   if (action === "focus-task" && goal) {
     event.stopPropagation();
     const task = findTaskById(goal, actionTarget.dataset.taskId);
-    if (task) setTimerTask(task);
+    if (task) setTimerTask(task, goal);
   }
   if (action === "start-first" && goal) {
     const task = findFirstOpenTask(goal);
-    if (task) setTimerTask(task);
+    if (task) setTimerTask(task, goal);
+  }
+  if (action === "view-roadmap" && goal) {
+    state.activeGoalId = goal.id;
+    state.view = "roadmap";
+    state.selectedHistoryId = null;
+    saveState();
+    render();
+  }
+  if (action === "select-goal" && goal) {
+    state.activeGoalId = goal.id;
+    state.timer.goalId = state.timer.goalId && state.timer.goalId !== goal.id ? null : state.timer.goalId;
+    state.timer.taskId = state.timer.goalId ? state.timer.taskId : null;
+    state.timer.taskTitle = state.timer.goalId ? state.timer.taskTitle : "";
+    saveState();
+    render();
   }
   if (action === "open-revise" && goal) {
     event.stopPropagation();
+    state.activeGoalId = goal.id;
     els.reviseForm.reset();
     els.reviseDialog.showModal();
   }
   if (action === "change-date" && goal) {
+    state.activeGoalId = goal.id;
     els.dateForm.elements.endDate.value = goal.endDate;
     els.dateDialog.showModal();
   }

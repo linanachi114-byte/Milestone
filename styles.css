@@ -375,6 +375,19 @@ button {
   gap: 12px;
 }
 
+.today-goal {
+  gap: 14px;
+}
+
+.panel-note {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f8f4ed;
+  border: 1px solid var(--soft);
+}
+
 .panel h2 {
   font-size: 18px;
 }
@@ -466,10 +479,46 @@ button {
 
 .inline-actions {
   align-items: stretch;
+  flex-wrap: wrap;
 }
 
 .inline-actions > * {
   flex: 1;
+  min-width: 0;
+}
+
+.goal-switcher {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.goal-switcher::-webkit-scrollbar {
+  display: none;
+}
+
+.goal-chip {
+  flex: 0 0 auto;
+  max-width: 240px;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-chip.active {
+  background: var(--accent-soft);
+  border-color: rgba(23, 107, 91, 0.36);
+  color: var(--accent-strong);
 }
 
 .phase-list {
