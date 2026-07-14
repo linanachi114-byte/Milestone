@@ -182,6 +182,45 @@ function getGoalProgress(goal) {
   };
 }
 
+function getGoalDayProgress(goal) {
+  const effectiveStart = getEffectiveStart(goal);
+  const total = Math.max(1, daysBetween(effectiveStart, goal.endDate));
+  if (goal.status === "completed") {
+    return { elapsed: total, total, percent: 100 };
+  }
+  const marker = goal.abandonedAt ? toISO(new Date(goal.abandonedAt)) : todayISO();
+  if (marker < effectiveStart) return { elapsed: 0, total, percent: 0 };
+  const elapsed = Math.min(total, Math.max(0, daysBetween(effectiveStart, marker)));
+  return {
+    elapsed,
+    total,
+    percent: Math.round((elapsed / total) * 100),
+  };
+}
+
+function goalStatusLabel(goal) {
+  if (goal.status === "completed") return "已完成";
+  if (goal.status === "abandoned") return "已放弃";
+  return "进行中";
+}
+
+function goalStatusClass(goal) {
+  if (goal.status === "completed") return "completed";
+  if (goal.status === "abandoned") return "abandoned";
+  return "active";
+}
+
+function getHistoryGoals() {
+  const active = [...state.goals].sort((a, b) => getEffectiveStart(a).localeCompare(getEffectiveStart(b)));
+  const completed = state.archivedGoals
+    .filter((goal) => goal.status === "completed")
+    .sort((a, b) => (b.completedAt || "").localeCompare(a.completedAt || ""));
+  const abandoned = state.archivedGoals
+    .filter((goal) => goal.status === "abandoned")
+    .sort((a, b) => (b.abandonedAt || "").localeCompare(a.abandonedAt || ""));
+  return [...active, ...completed, ...abandoned];
+}
+
 function getEffectiveStart(goal) {
   return goal.includeStart ? goal.startDate : addDays(goal.startDate, 1);
 }
@@ -809,7 +848,6 @@ function renderEmpty() {
         <p class="eyebrow">从一个长期目标开始</p>
         <h2>先定方向，再让每天变得具体。</h2>
       </div>
-      <p>输入目标和日期范围，系统会生成阶段路线图，只细化当前阶段，避免把几个月后的每天都提前写死。</p>
       <button class="primary-button" data-action="open-goal">
         ${icon("spark")}
         新建长期目标
@@ -1113,23 +1151,18 @@ function renderFocus(goal) {
 }
 
 function renderHistory() {
-  const selected = state.archivedGoals.find((goal) => goal.id === state.selectedHistoryId);
+  const selected = [...state.goals, ...state.archivedGoals].find((goal) => goal.id === state.selectedHistoryId);
   if (selected) {
     renderHistoryDetail(selected);
     return;
   }
+  const goals = getHistoryGoals();
   els.app.innerHTML = `
     <div class="stack">
-      <section class="panel">
-        <p class="eyebrow">目标档案</p>
-        <h2>完成和放弃都保留痕迹</h2>
-        <p>这里会沉淀每个长期目标的每日任务、调整记录和最终状态。</p>
-      </section>
       <div class="history-list">
-        ${state.archivedGoals.length ? state.archivedGoals.map(renderHistoryCard).join("") : `
+        ${goals.length ? goals.map(renderHistoryCard).join("") : `
           <section class="empty-state">
             <h2>还没有历史记录。</h2>
-            <p>完成或放弃一个目标后，它会出现在这里。</p>
           </section>
         `}
       </div>
@@ -1138,28 +1171,28 @@ function renderHistory() {
 }
 
 function renderHistoryCard(goal) {
-  const progress = getGoalProgress(goal);
+  const progress = getGoalDayProgress(goal);
   return `
     <article class="history-card" data-action="open-history" data-goal-id="${goal.id}">
       <div class="history-top">
-        <span class="status-pill">${goal.status === "completed" ? "已完成" : "已放弃"}</span>
-        <span class="mini-pill amber">${progress.percent}%</span>
+        <span class="status-pill ${goalStatusClass(goal)}">${goalStatusLabel(goal)}</span>
+        <span class="mini-pill ${goalStatusClass(goal)}">${progress.percent}%</span>
       </div>
       <h3>${escapeHtml(goal.title)}</h3>
-      <p>${formatDate(getEffectiveStart(goal))} - ${formatDate(goal.endDate)} · 完成 ${progress.done}/${progress.total} 个细项 · 调整 ${goal.revisions.length} 次</p>
+      <p>${formatDate(getEffectiveStart(goal))} - ${formatDate(goal.endDate)} · 第 ${progress.elapsed}/${progress.total} 天</p>
     </article>
   `;
 }
 
 function renderHistoryDetail(goal) {
-  const progress = getGoalProgress(goal);
+  const progress = getGoalDayProgress(goal);
   const days = Object.values(goal.dailyPlans).sort((a, b) => a.date.localeCompare(b.date));
   els.app.innerHTML = `
     <div class="stack">
       <section class="goal-hero">
         <div class="hero-topline">
-          <span class="status-pill">${goal.status === "completed" ? "已完成" : "已放弃"}</span>
-          <span class="mini-pill amber">${progress.percent}%</span>
+          <span class="status-pill ${goalStatusClass(goal)}">${goalStatusLabel(goal)}</span>
+          <span class="mini-pill ${goalStatusClass(goal)}">${progress.percent}%</span>
         </div>
         <div>
           <h2>${escapeHtml(goal.title)}</h2>
@@ -1167,7 +1200,7 @@ function renderHistoryDetail(goal) {
         </div>
         <div class="progress-wrap">
           <div class="progress-track"><div class="progress-bar" style="--progress:${progress.percent}%"></div></div>
-          <div class="progress-meta"><span>${progress.done}/${progress.total} 个细项</span><span>${progress.percent}%</span></div>
+          <div class="progress-meta"><span>第 ${progress.elapsed}/${progress.total} 天</span><span>${progress.percent}%</span></div>
         </div>
       </section>
       <section class="panel">
@@ -1183,12 +1216,6 @@ function renderHistoryDetail(goal) {
           `).join("")}
         </div>
       </section>
-      ${goal.revisions.length ? `
-        <section class="panel">
-          <p class="eyebrow">调整记录</p>
-          ${goal.revisions.map((revision) => `<p>${new Date(revision.at).toLocaleString("zh-CN")}：${escapeHtml(revision.feedback)}</p>`).join("")}
-        </section>
-      ` : ""}
     </div>
   `;
 }

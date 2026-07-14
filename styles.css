@@ -308,6 +308,24 @@ button:disabled {
   color: #8b5511;
 }
 
+.status-pill.completed,
+.mini-pill.completed {
+  background: #dceee8;
+  color: #105246;
+}
+
+.status-pill.active,
+.mini-pill.active {
+  background: #f7ead5;
+  color: #8b5511;
+}
+
+.status-pill.abandoned,
+.mini-pill.abandoned {
+  background: #fff0ec;
+  color: #9f3928;
+}
+
 .mini-pill.blue {
   background: #e3edf7;
   color: #27587f;
