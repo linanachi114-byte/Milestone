@@ -832,7 +832,7 @@ function updateHeader(goal) {
   els.headerKicker.textContent = state.view === "today" && state.goals.length
     ? `${getActiveTodayGoals().length} 个进行中 · ${getUpcomingGoals().length} 个未开始`
     : goal ? goal.title : "长期主义番茄钟";
-  els.backButton.style.visibility = state.selectedHistoryId ? "visible" : "hidden";
+  els.backButton.hidden = !state.selectedHistoryId;
 }
 
 function updateTabs() {
