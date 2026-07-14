@@ -120,12 +120,19 @@
         <details class="ai-config">
           <summary>AI 设置</summary>
           <label class="field">
-            <span>OpenAI API Key</span>
+            <span>服务商</span>
+            <select name="provider">
+              <option value="deepseek">DeepSeek</option>
+              <option value="openai">OpenAI</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>API Key</span>
             <input name="apiKey" type="password" autocomplete="off" placeholder="sk-..." />
           </label>
           <label class="field">
             <span>模型</span>
-            <input name="model" value="gpt-4.1-mini" />
+            <input name="model" value="deepseek-v4-flash" />
           </label>
         </details>
 
@@ -185,6 +192,7 @@
       </form>
     </dialog>
 
+    <script src="./config.local.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

@@ -576,6 +576,11 @@ button:disabled {
   box-shadow: 0 14px 32px rgba(23, 107, 91, 0.12);
 }
 
+.upcoming-goal {
+  background: #fbf8f1;
+  box-shadow: none;
+}
+
 .phase-card h3 {
   font-size: 18px;
 }

@@ -73,17 +73,32 @@ function saveState() {
 }
 
 function loadAiConfig() {
+  const localConfig = window.MILESTONE_AI_CONFIG || {};
   try {
-    return JSON.parse(localStorage.getItem(AI_CONFIG_KEY)) || { apiKey: "", model: "gpt-4.1-mini" };
+    const saved = JSON.parse(localStorage.getItem(AI_CONFIG_KEY)) || {};
+    const preferred = saved.apiKey ? saved : localConfig;
+    return {
+      provider: preferred.provider || "deepseek",
+      apiKey: preferred.apiKey || "",
+      model: preferred.model || "deepseek-v4-flash",
+      baseUrl: preferred.baseUrl || "https://api.deepseek.com",
+    };
   } catch {
-    return { apiKey: "", model: "gpt-4.1-mini" };
+    return {
+      provider: localConfig.provider || "deepseek",
+      apiKey: localConfig.apiKey || "",
+      model: localConfig.model || "deepseek-v4-flash",
+      baseUrl: localConfig.baseUrl || "https://api.deepseek.com",
+    };
   }
 }
 
 function saveAiConfig(config) {
   localStorage.setItem(AI_CONFIG_KEY, JSON.stringify({
+    provider: config.provider || "deepseek",
     apiKey: config.apiKey || "",
-    model: config.model || "gpt-4.1-mini",
+    model: config.model || (config.provider === "openai" ? "gpt-4.1-mini" : "deepseek-v4-flash"),
+    baseUrl: config.baseUrl || (config.provider === "openai" ? "https://api.openai.com/v1" : "https://api.deepseek.com"),
   }));
 }
 
@@ -176,6 +191,23 @@ function getRemainingDays(goal) {
   if (today > goal.endDate) return 0;
   const start = today < getEffectiveStart(goal) ? getEffectiveStart(goal) : today;
   return Math.max(0, daysBetween(start, goal.endDate));
+}
+
+function isGoalActiveToday(goal) {
+  const today = todayISO();
+  return today >= getEffectiveStart(goal) && today <= goal.endDate;
+}
+
+function isGoalUpcoming(goal) {
+  return todayISO() < getEffectiveStart(goal);
+}
+
+function getActiveTodayGoals() {
+  return state.goals.filter(isGoalActiveToday);
+}
+
+function getUpcomingGoals() {
+  return state.goals.filter(isGoalUpcoming).sort((a, b) => getEffectiveStart(a).localeCompare(getEffectiveStart(b)));
 }
 
 function currentPhase(goal) {
@@ -344,7 +376,15 @@ function goalPlanSchema() {
 }
 
 async function requestAiJson({ aiConfig, system, user, schemaName, schema }) {
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  if ((aiConfig.provider || "deepseek") === "openai") {
+    return requestOpenAiJson({ aiConfig, system, user, schemaName, schema });
+  }
+  return requestDeepSeekJson({ aiConfig, system, user, schemaName, schema });
+}
+
+async function requestOpenAiJson({ aiConfig, system, user, schemaName, schema }) {
+  const baseUrl = (aiConfig.baseUrl || "https://api.openai.com/v1").replace(/\/$/, "");
+  const response = await fetch(`${baseUrl}/responses`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -373,6 +413,37 @@ async function requestAiJson({ aiConfig, system, user, schemaName, schema }) {
   const data = await response.json();
   const text = data.output_text || data.output?.flatMap((item) => item.content || []).find((item) => item.type === "output_text")?.text;
   if (!text) throw new Error("AI 没有返回可解析的计划");
+  return JSON.parse(text);
+}
+
+async function requestDeepSeekJson({ aiConfig, system, user, schemaName, schema }) {
+  const baseUrl = (aiConfig.baseUrl || "https://api.deepseek.com").replace(/\/$/, "");
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${aiConfig.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: aiConfig.model || "deepseek-v4-flash",
+      messages: [
+        {
+          role: "system",
+          content: `${system}\n只返回一个 JSON 对象，不要 Markdown，不要解释。JSON 必须满足这个 schema：${JSON.stringify({ name: schemaName, schema })}`,
+        },
+        { role: "user", content: JSON.stringify(user) },
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.3,
+    }),
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `DeepSeek API ${response.status}`);
+  }
+  const data = await response.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error("DeepSeek 没有返回可解析的计划");
   return JSON.parse(text);
 }
 
@@ -719,7 +790,9 @@ function updateHeader(goal) {
     history: "历史",
   };
   els.headerTitle.textContent = state.selectedHistoryId ? "目标档案" : titles[state.view];
-  els.headerKicker.textContent = state.view === "today" && state.goals.length > 1 ? `${state.goals.length} 个进行中计划` : goal ? goal.title : "长期主义番茄钟";
+  els.headerKicker.textContent = state.view === "today" && state.goals.length
+    ? `${getActiveTodayGoals().length} 个进行中 · ${getUpcomingGoals().length} 个未开始`
+    : goal ? goal.title : "长期主义番茄钟";
   els.backButton.style.visibility = state.selectedHistoryId ? "visible" : "hidden";
 }
 
@@ -776,28 +849,44 @@ function renderGoalHero(goal) {
 }
 
 function renderToday() {
-  state.goals.forEach(ensureTodayPlan);
-  const todayTasks = state.goals.flatMap((goal) => getTodayTasks(goal).map((task) => ({ goal, task })));
+  const activeGoals = getActiveTodayGoals();
+  const upcomingGoals = getUpcomingGoals();
+  activeGoals.forEach(ensureTodayPlan);
+  const todayTasks = activeGoals.flatMap((goal) => getTodayTasks(goal).map((task) => ({ goal, task })));
   const doneToday = todayTasks.filter(({ task }) => task.done).length;
 
   els.app.innerHTML = `
     <div class="stack">
       <section class="goal-hero">
         <div class="hero-topline">
-          <span class="status-pill">${state.goals.length} 个进行中</span>
+          <span class="status-pill">${activeGoals.length} 个进行中</span>
           <span class="mini-pill amber">${doneToday}/${todayTasks.length || 0} 今日细项</span>
         </div>
         <div>
           <h2>今天处理所有计划</h2>
-          <p>每个长期目标保留自己的路线、任务和归档；今日页只把它们聚合到一起，方便逐个打卡。</p>
+          <p>今日只展示已经开始的计划任务；尚未开始的计划放在底部等待区。</p>
         </div>
         <div class="metric-grid">
-          <div class="metric"><b>${state.goals.length}</b><span>计划</span></div>
+          <div class="metric"><b>${activeGoals.length}</b><span>进行中</span></div>
+          <div class="metric"><b>${upcomingGoals.length}</b><span>未开始</span></div>
           <div class="metric"><b>${todayTasks.length}</b><span>今日任务</span></div>
-          <div class="metric"><b>${doneToday}</b><span>已完成</span></div>
         </div>
       </section>
-      ${state.goals.map(renderTodayGoal).join("")}
+      ${activeGoals.length ? activeGoals.map(renderTodayGoal).join("") : `
+        <section class="panel">
+          <p class="eyebrow">今日没有执行项</p>
+          <h2>当前没有已开始的计划</h2>
+          <p>未开始计划会在到达开始日期后自动进入今日任务区。</p>
+        </section>
+      `}
+      ${upcomingGoals.length ? `
+        <section class="panel">
+          <p class="eyebrow">未开始</p>
+          <div class="phase-list">
+            ${upcomingGoals.map(renderUpcomingGoal).join("")}
+          </div>
+        </section>
+      ` : ""}
     </div>
   `;
 }
@@ -860,6 +949,21 @@ function renderTodayGoal(goal) {
   `;
 }
 
+function renderUpcomingGoal(goal) {
+  return `
+    <article class="phase-card upcoming-goal" data-goal-id="${goal.id}">
+      <div class="phase-top">
+        <div>
+          <p class="eyebrow">${formatDateWithWeekday(getEffectiveStart(goal))} 开始</p>
+          <h3>${escapeHtml(goal.title)}</h3>
+        </div>
+        <span class="mini-pill amber">未开始</span>
+      </div>
+      <p>${formatDate(getEffectiveStart(goal))} - ${formatDate(goal.endDate)} · ${goal.phases.length} 个阶段 · 每天约 ${goal.minutes} 分钟</p>
+    </article>
+  `;
+}
+
 function renderTask(task, goal) {
   return `
     <article class="task-card ${task.done ? "completed" : ""}" data-goal-id="${goal.id}" data-task-id="${task.id}" data-action="toggle-task">
@@ -879,12 +983,13 @@ function renderTask(task, goal) {
 }
 
 function renderGoalSwitcher() {
-  if (state.goals.length <= 1) return "";
+  const switchableGoals = getActiveTodayGoals();
+  if (switchableGoals.length <= 1) return "";
   return `
     <section class="panel">
       <p class="eyebrow">当前计划</p>
       <div class="goal-switcher">
-        ${state.goals.map((goal) => `
+        ${switchableGoals.map((goal) => `
           <button class="goal-chip ${goal.id === state.activeGoalId ? "active" : ""}" data-action="select-goal" data-goal-id="${goal.id}">
             ${escapeHtml(goal.title)}
           </button>
@@ -956,6 +1061,14 @@ function renderPhase(goal, phase) {
 
 function renderFocus(goal) {
   goal = getTimerGoal() || goal;
+  if (goal && !isGoalActiveToday(goal)) {
+    goal = getActiveTodayGoals()[0] || null;
+    state.activeGoalId = goal?.id || state.activeGoalId;
+    state.timer.goalId = null;
+    state.timer.taskId = null;
+    state.timer.taskTitle = "";
+    saveState();
+  }
   if (!goal) {
     renderEmpty();
     return;
@@ -1179,8 +1292,9 @@ function openGoalDialog() {
   els.goalForm.elements.includeStart.checked = true;
   els.goalForm.elements.minutes.value = "45";
   els.goalForm.elements.intensity.value = "steady";
+  els.goalForm.elements.provider.value = aiConfig.provider || "deepseek";
   els.goalForm.elements.apiKey.value = aiConfig.apiKey || "";
-  els.goalForm.elements.model.value = aiConfig.model || "gpt-4.1-mini";
+  els.goalForm.elements.model.value = aiConfig.model || "deepseek-v4-flash";
   els.goalDialog.showModal();
 }
 
@@ -1255,6 +1369,7 @@ document.addEventListener("click", (event) => {
     render();
   }
   if (action === "select-goal" && goal) {
+    if (!isGoalActiveToday(goal)) return;
     state.activeGoalId = goal.id;
     state.timer.goalId = state.timer.goalId && state.timer.goalId !== goal.id ? null : state.timer.goalId;
     state.timer.taskId = state.timer.goalId ? state.timer.taskId : null;
@@ -1323,6 +1438,11 @@ els.tabs.forEach((tab) => {
 
 els.newGoalButton.addEventListener("click", openGoalDialog);
 
+els.goalForm.elements.provider.addEventListener("change", () => {
+  const provider = els.goalForm.elements.provider.value;
+  els.goalForm.elements.model.value = provider === "openai" ? "gpt-4.1-mini" : "deepseek-v4-flash";
+});
+
 els.backButton.addEventListener("click", () => {
   state.selectedHistoryId = null;
   saveState();
@@ -1352,8 +1472,10 @@ els.goalForm.addEventListener("submit", async (event) => {
     preference: formData.get("preference").trim(),
   };
   const aiConfig = {
+    provider: formData.get("provider") || "deepseek",
     apiKey: formData.get("apiKey").trim(),
-    model: formData.get("model").trim() || "gpt-4.1-mini",
+    model: formData.get("model").trim() || (formData.get("provider") === "openai" ? "gpt-4.1-mini" : "deepseek-v4-flash"),
+    baseUrl: formData.get("provider") === "openai" ? "https://api.openai.com/v1" : "https://api.deepseek.com",
   };
   saveAiConfig(aiConfig);
 
