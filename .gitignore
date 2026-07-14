@@ -1,0 +1,7 @@
+# Local browser/system files
+Thumbs.db
+.DS_Store
+
+# Temporary screenshots and logs
+*.log
+screenshot-*.png
